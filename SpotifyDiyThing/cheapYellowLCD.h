@@ -188,6 +188,16 @@ public:
     return imageStatus;
   }
 
+  // Re-decode the buffered album art without re-downloading. No-op if nothing
+  // has been displayed yet or the buffer is missing.
+  void redrawAlbumArt()
+  {
+    if (albumDisplayed && SPIFFS.exists(ALBUM_ART))
+    {
+      drawImagefromFile(ALBUM_ART);
+    }
+  }
+
   // NFC tag messages
   void markDisplayAsTagRead()
   {

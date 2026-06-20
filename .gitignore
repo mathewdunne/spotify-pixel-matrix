@@ -4,3 +4,6 @@
 
 .pio
 .vscode
+
+# Local device config — holds WiFi credentials, never commit
+SpotifyDiyThing/config.h

@@ -19,6 +19,11 @@ class SpotifyDisplay {
     virtual boolean processImageInfo (CurrentlyPlaying currentlyPlaying)=0;
     virtual int displayImage() = 0;
 
+    // Redraw the last album art from the buffered file (no re-download). Used to
+    // restore the screen after it was blanked for low light, even if nothing is
+    // currently playing.
+    virtual void redrawAlbumArt() = 0;
+
     //NFC tag messages
     virtual void markDisplayAsTagRead() = 0;
     virtual void markDisplayAsTagWritten() = 0;

@@ -27,7 +27,7 @@
 
 #define NFC_ENABLED 0
 #define LIGHT_SENSE_PIN 35
-#define LIGHT_SENSE_THRESHOLD 375
+// LIGHT_SENSE_THRESHOLD is defined in config.h (tunable per device)
 
 #define NUM_SAMPLES 10
 uint16_t lightSenseSamples[NUM_SAMPLES];
@@ -100,6 +100,9 @@ WiFiClientSecure client;
 
 #include "WifiManagerHandler.h"
 
+// Hardcoded WiFi + now-playing API config (gitignored; see config.example.h)
+#include "config.h"
+
 // ----------------------------
 // Display Handling Code
 // ----------------------------
@@ -118,6 +121,9 @@ SpotifyDisplay *spotifyDisplay = &matrixDisplay;
 #endif
 // ----------------------------
 
+// Now-playing poller — uses `spotifyDisplay` and `client` defined above
+#include "nowPlaying.h"
+
 #ifdef NFC_ENABLED
 #include "nfc.h"
 #endif
@@ -129,18 +135,39 @@ void drawWifiManagerMessage(WiFiManager *myWiFiManager)
 
 bool isDisplaying = false;
 
+// Connect to WiFi using the hardcoded credentials from config.h. Replaces the
+// old WiFiManager captive-portal flow.
+void connectWiFi()
+{
+  Serial.print("Connecting to WiFi: ");
+  Serial.println(WIFI_SSID);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.setHostname("spotifyscreen");
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  unsigned long startAttempt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 30000)
+  {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.println("WiFi connection failed, restarting...");
+    delay(1000);
+    ESP.restart();
+  }
+
+  Serial.print("Connected. IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
 void setup()
 {
   Serial.begin(115200);
-
-  bool forceConfig = false;
-
-  drd = new DoubleResetDetector(DRD_TIMEOUT, DRD_ADDRESS);
-  if (drd->detectDoubleReset())
-  {
-    Serial.println(F("Forcing config mode as there was a Double reset detected"));
-    forceConfig = true;
-  }
 
   spotifyDisplay->displaySetup(&spotify);
 
@@ -155,11 +182,7 @@ void setup()
   }
 #endif
 
-  // Initialise SPIFFS, if this fails try .begin(true)
-  // NOTE: I believe this formats it though it will erase everything on
-  // spiffs already! In this example that is not a problem.
-  // I have found once I used the true flag once, I could use it
-  // without the true flag after that.
+  // Initialise SPIFFS — used to buffer the downloaded album art at /album.jpg.
   bool spiffsInitSuccess = SPIFFS.begin(false) || SPIFFS.begin(true);
   if (!spiffsInitSuccess)
   {
@@ -169,50 +192,15 @@ void setup()
   }
   Serial.println("\r\nInitialisation done.");
 
-  refreshToken[0] = '\0';
-  if (!fetchConfigFile(refreshToken, clientId, clientSecret))
-  {
-    // Failed to fetch config file, need to launch Wifi Manager
-    forceConfig = true;
-  }
+  // Connect with the hardcoded credentials from config.h. The old WiFiManager
+  // captive portal + SPIFFS config + Spotify OAuth refresh-token flow are left
+  // in the codebase (refreshToken.h / WifiManagerHandler.h / configFile.h) but
+  // are no longer called.
+  connectWiFi();
 
-  setupWiFiManager(forceConfig, refreshToken, &saveConfigFile, &drawWifiManagerMessage);
-
-  // If we are here we should be connected to the Wifi
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
-
-  spotifySetup(spotifyDisplay, clientId, clientSecret);
-
-#if defined YELLOW_DISPLAY
-
-  pinMode(0, INPUT); // has an internal pullup
-  bool forceRefreshToken = digitalRead(0) == LOW;
-  if (forceRefreshToken)
-  {
-    Serial.println("GPIO 0 is low, forcing refreshToken");
-  }
-
-#else
-  bool forceRefreshToken = false;
-
-#endif
-
-  // Check if we have a refresh Token
-  if (forceRefreshToken || refreshToken[0] == '\0')
-  {
-
-    spotifyDisplay->drawRefreshTokenMessage();
-    Serial.println("Launching refresh token flow");
-    if (launchRefreshTokenFlow(&spotify, clientId))
-    {
-      Serial.print("Refresh Token: ");
-      Serial.println(refreshToken);
-      saveConfigFile(refreshToken, clientId, clientSecret);
-    }
-  }
-
-  spotifyRefreshToken(refreshToken);
+  // The display keeps the `spotify` object only to download album art via
+  // getImage(); no Spotify access token is needed for that.
+  nowPlayingSetup(spotifyDisplay);
 
   spotifyDisplay->showDefaultScreen();
 
@@ -237,8 +225,6 @@ void setup()
 
 void loop()
 {
-  drd->loop();
-
   bool forceUpdate = false;
 
 #ifdef NFC_ENABLED
@@ -267,14 +253,19 @@ void loop()
   // Serial.println(lightSense);
   if (lightSense > LIGHT_SENSE_THRESHOLD)
   {
+    bool justWokeUp = !isDisplaying;
+    if (justWokeUp)
+    {
+      // Sensor just uncovered — the screen was blanked. Redraw the last album
+      // art straight from the buffered file so it reappears immediately, even
+      // if nothing is playing now (in which case the poll below redraws nothing).
+      spotifyDisplay->redrawAlbumArt();
+      isDisplaying = true;
+    }
+
     spotifyDisplay->checkForInput();
 
-    updateCurrentlyPlaying(forceUpdate || !isDisplaying);
-
-    updateProgressBar();
-
-    if (!isDisplaying)
-      isDisplaying = true;
+    updateNowPlaying(forceUpdate || justWokeUp);
   }
   else
   {

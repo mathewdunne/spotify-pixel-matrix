@@ -12,7 +12,7 @@ char lastTrackContextUri[200];
 
 // You might want to make this much smaller, so it will update responsively
 
-unsigned long delayBetweenRequests = 1000; // Time between requests (5 seconds)
+unsigned long delayBetweenRequests = 2000; // Time between requests (2 seconds)
 unsigned long requestDueTime;              // time when request due
 
 unsigned long delayBetweenProgressUpdates = 500; // Time between requests (0.5 seconds)
