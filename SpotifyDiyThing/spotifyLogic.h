@@ -12,7 +12,7 @@ char lastTrackContextUri[200];
 
 // You might want to make this much smaller, so it will update responsively
 
-unsigned long delayBetweenRequests = 5000; // Time between requests (5 seconds)
+unsigned long delayBetweenRequests = 1000; // Time between requests (5 seconds)
 unsigned long requestDueTime;              // time when request due
 
 unsigned long delayBetweenProgressUpdates = 500; // Time between requests (0.5 seconds)
@@ -125,12 +125,12 @@ void updateCurrentlyPlaying(boolean forceUpdate)
     Serial.println("getting currently playing song:");
     // Check if music is playing currently on the account.
     int status = spotify.getCurrentlyPlaying(handleCurrentlyPlaying, SPOTIFY_MARKET);
-    if (status == 200)
+    if (status == 200 || status == 204) // 204 means nothing playing, still show last image
     {
       Serial.println("Successfully got currently playing");
       if (albumArtChanged || forceUpdate)
       {
-        sp_Display->clearImage();
+        // sp_Display->clearImage();
         int displayImageResult = sp_Display->displayImage();
 
         if (displayImageResult)

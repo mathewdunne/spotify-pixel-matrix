@@ -25,7 +25,13 @@
 #define YELLOW_DISPLAY // Default to Yellow Display for display type
 #endif
 
-#define NFC_ENABLED 1
+#define NFC_ENABLED 0
+#define LIGHT_SENSE_PIN 35
+#define LIGHT_SENSE_THRESHOLD 375
+
+#define NUM_SAMPLES 10
+uint16_t lightSenseSamples[NUM_SAMPLES];
+uint8_t sampleIndex = 0;
 
 // This causes issues in certain circumstances e.g. Play an album and let it auto play to related songs
 bool writeContextToNfc = true;
@@ -69,12 +75,14 @@ bool writeContextToNfc = true;
 
 #include <ArduinoJson.h>
 
+#include <ArduinoOTA.h>
+
 WiFiClientSecure client;
 
 //------- Replace the following! ------
 
 // Country code, including this is advisable
-#define SPOTIFY_MARKET "IE"
+#define SPOTIFY_MARKET "CA"
 //------- ---------------------- ------
 
 // ----------------------------
@@ -118,6 +126,8 @@ void drawWifiManagerMessage(WiFiManager *myWiFiManager)
 {
   spotifyDisplay->drawWifiManagerMessage(myWiFiManager);
 }
+
+bool isDisplaying = false;
 
 void setup()
 {
@@ -205,13 +215,29 @@ void setup()
   spotifyRefreshToken(refreshToken);
 
   spotifyDisplay->showDefaultScreen();
+
+  pinMode(LIGHT_SENSE_PIN, INPUT);
+
+  // Initialize lightSenseSamples array
+  for (int i = 0; i < NUM_SAMPLES; i++)
+  {
+    lightSenseSamples[i] = 0;
+  }
+
+  ArduinoOTA.setHostname("spotifyscreen");
+  ArduinoOTA.onStart([]()
+                     { Serial.println("OTA update start"); });
+  ArduinoOTA.onEnd([]()
+                   { Serial.println("\nOTA update complete"); });
+  ArduinoOTA.onError([](ota_error_t error)
+                     { Serial.printf("OTA Error [%u]\n", error); });
+
+  ArduinoOTA.begin(); // Start OTA service
 }
 
 void loop()
 {
   drd->loop();
-
-  spotifyDisplay->checkForInput();
 
   bool forceUpdate = false;
 
@@ -227,7 +253,37 @@ void loop()
 
 #endif
 
-  updateCurrentlyPlaying(forceUpdate);
+  // Update the moving average
+  lightSenseSamples[sampleIndex] = analogRead(LIGHT_SENSE_PIN);
+  sampleIndex = (sampleIndex + 1) % NUM_SAMPLES;
 
-  updateProgressBar();
+  uint32_t sum = 0;
+  for (int i = 0; i < NUM_SAMPLES; i++)
+  {
+    sum += lightSenseSamples[i];
+  }
+  uint16_t lightSense = sum / NUM_SAMPLES;
+
+  // Serial.println(lightSense);
+  if (lightSense > LIGHT_SENSE_THRESHOLD)
+  {
+    spotifyDisplay->checkForInput();
+
+    updateCurrentlyPlaying(forceUpdate || !isDisplaying);
+
+    updateProgressBar();
+
+    if (!isDisplaying)
+      isDisplaying = true;
+  }
+  else
+  {
+    if (isDisplaying)
+    {
+      spotifyDisplay->showDefaultScreen();
+      isDisplaying = false;
+    }
+  }
+
+  ArduinoOTA.handle(); // Listen for OTA updates
 }

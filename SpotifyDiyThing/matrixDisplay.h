@@ -24,9 +24,10 @@
 // -------   Matrix Config   ------
 // -------------------------------------
 
-const int panelResX = 64;      // Number of pixels wide of each INDIVIDUAL panel module.
-const int panelResY = 64;     // Number of pixels tall of each INDIVIDUAL panel module.
+const int panelResX = 64;       // Number of pixels wide of each INDIVIDUAL panel module.
+const int panelResY = 64;       // Number of pixels tall of each INDIVIDUAL panel module.
 const int panel_chain = 1;      // Total number of panels chained one to another
+const uint8_t BRIGHTNESS = 128; // Brightness of the display (0-255)
 
 // -------------------------------
 // Putting this stuff outside the class because
@@ -44,221 +45,318 @@ uint16_t myBLUE = dma_display->color565(0, 0, 255);
 
 JPEGDEC jpeg;
 
-const char* ALBUM_ART = "/album.jpg";
+const char *ALBUM_ART = "/album.jpg";
+
+// Adjustable parameters
+#define SHADOW_LIFT 0.05f   // 0.0 .. ~0.1  (Lift the darkest areas a bit)
+#define HIGHLIGHT_SAT 0.90f // ~0.9 .. 1.0 (Pull the brightest highlights down a bit)
+#define GAMMA_MID 1.6f      // ~1.4 .. 2.2 (Overall mid-tone gamma)
+
+// We'll store the curve in gammaLookup[]
+static uint8_t gammaLookup[256];
+
+// This function applies an "S-shaped" tone curve, with shadow lift, mid gamma, and highlight saturation
+void createCustomCurveTable()
+{
+  // Pre-calculate powered endpoints so we can re-map linearly after powf()
+  float lowPow = powf(SHADOW_LIFT, GAMMA_MID);
+  float highPow = powf(HIGHLIGHT_SAT, GAMMA_MID);
+
+  for (int i = 0; i < 256; i++)
+  {
+    // Normalize 0..255 -> 0..1
+    float x = (float)i / 255.0f;
+
+    // 1) Move x away from the extremes [0..1] -> [SHADOW_LIFT..HIGHLIGHT_SAT]
+    x = SHADOW_LIFT + x * (HIGHLIGHT_SAT - SHADOW_LIFT);
+
+    // 2) Apply the mid gamma
+    x = powf(x, GAMMA_MID);
+
+    // 3) Now compress or expand so the range is back to [0..1]
+    //    i.e. map [lowPow..highPow] -> [0..1]
+    x = (x - lowPow) / (highPow - lowPow);
+
+    // Prevent slight floating errors from going out of bounds
+    if (x < 0.0f)
+      x = 0.0f;
+    if (x > 1.0f)
+      x = 1.0f;
+
+    // Convert back to 8-bit
+    gammaLookup[i] = (uint8_t)(x * 255.0f + 0.5f);
+  }
+}
 
 // This next function will be called during decoding of the jpeg file to
 // render each block to the Matrix.  If you use a different display
 // you will need to adapt this function to suit.
 int JPEGDraw(JPEGDRAW *pDraw)
 {
-  // Stop further decoding as image is running off bottom of screen
-  if (  pDraw->y >= dma_display->height() ) return 1;
+  if (pDraw->y >= dma_display->height())
+    return 1;
 
-  dma_display->drawRGBBitmap(pDraw->x, pDraw->y, pDraw->pPixels, pDraw->iWidth, pDraw->iHeight);
+  uint16_t *pixels = (uint16_t *)pDraw->pPixels;
+  int pixelCount = pDraw->iWidth * pDraw->iHeight;
+
+  for (int i = 0; i < pixelCount; i++)
+  {
+    uint16_t color = pixels[i];
+
+    // Extract 5-bit R, 6-bit G, 5-bit B
+    uint8_t r = (color >> 11) & 0x1F; // 0..31
+    uint8_t g = (color >> 5) & 0x3F;  // 0..63
+    uint8_t b = color & 0x1F;         // 0..31
+
+    // Convert to 8-bit
+    r = (r * 255) / 31;
+    g = (g * 255) / 63;
+    b = (b * 255) / 31;
+
+    // Apply custom curve
+    r = gammaLookup[r];
+    g = gammaLookup[g];
+    b = gammaLookup[b];
+
+    // Downsample back to 5-6-5
+    r = (r * 31) / 255;
+    g = (g * 63) / 255;
+    b = (b * 31) / 255;
+
+    // Optional green “deflator” if you still see greenish blacks
+    g = (uint8_t)(g * 0.95); // try 0.90..0.99
+
+    // Pack back to 16 bits
+    pixels[i] = (r << 11) | (g << 5) | b;
+  }
+
+  dma_display->drawRGBBitmap(pDraw->x, pDraw->y, pixels, pDraw->iWidth, pDraw->iHeight);
   return 1;
 }
 
 fs::File myfile;
 
-void * myOpen(const char *filename, int32_t *size) {
+void *myOpen(const char *filename, int32_t *size)
+{
   myfile = SPIFFS.open(filename);
   *size = myfile.size();
   return &myfile;
 }
-void myClose(void *handle) {
-  if (myfile) myfile.close();
+void myClose(void *handle)
+{
+  if (myfile)
+    myfile.close();
 }
-int32_t myRead(JPEGFILE *handle, uint8_t *buffer, int32_t length) {
-  if (!myfile) return 0;
+int32_t myRead(JPEGFILE *handle, uint8_t *buffer, int32_t length)
+{
+  if (!myfile)
+    return 0;
   return myfile.read(buffer, length);
 }
-int32_t mySeek(JPEGFILE *handle, int32_t position) {
-  if (!myfile) return 0;
+int32_t mySeek(JPEGFILE *handle, int32_t position)
+{
+  if (!myfile)
+    return 0;
   return myfile.seek(position);
 }
 
-class MatrixDisplay: public SpotifyDisplay {
-  public:
+class MatrixDisplay : public SpotifyDisplay
+{
+public:
+  void displaySetup(SpotifyArduino *spotifyObj)
+  {
 
-    void displaySetup(SpotifyArduino *spotifyObj) {
+    spotify_display = spotifyObj;
 
-      spotify_display = spotifyObj;
+    Serial.println("matrix display setup");
+    setWidth(panelResX * panel_chain);
+    setHeight(panelResY);
 
-      Serial.println("matrix display setup");
-      setWidth(panelResX * panel_chain);
-      setHeight(panelResY);
+    setImageHeight(64);
+    setImageWidth(64);
 
-      setImageHeight(64);
-      setImageWidth(64);
+    HUB75_I2S_CFG mxconfig(
+        panelResX,  // module width
+        panelResY,  // module height
+        panel_chain // Chain length
+    );
 
-      HUB75_I2S_CFG mxconfig(
-        panelResX,   // module width
-        panelResY,   // module height
-        panel_chain    // Chain length
-      );
+    // If you are using a 64x64 matrix you need to pass a value for the E pin
+    // The trinity connects GPIO 18 to E.
+    // This can be commented out for any smaller displays (but should work fine with it)
+    mxconfig.gpio.e = 18;
 
-      // If you are using a 64x64 matrix you need to pass a value for the E pin
-      // The trinity connects GPIO 18 to E.
-      // This can be commented out for any smaller displays (but should work fine with it)
-      mxconfig.gpio.e = 18;
+    // May or may not be needed depending on your matrix
+    // Example of what needing it looks like:
+    // https://github.com/mrfaptastic/ESP32-HUB75-MatrixPanel-I2S-DMA/issues/134#issuecomment-866367216
+    mxconfig.clkphase = false;
 
-      // May or may not be needed depending on your matrix
-      // Example of what needing it looks like:
-      // https://github.com/mrfaptastic/ESP32-HUB75-MatrixPanel-I2S-DMA/issues/134#issuecomment-866367216
-      mxconfig.clkphase = false;
+    // Some matrix panels use different ICs for driving them and some of them have strange quirks.
+    // If the display is not working right, try this.
+    // mxconfig.driver = HUB75_I2S_CFG::FM6126A;
 
-      // Some matrix panels use different ICs for driving them and some of them have strange quirks.
-      // If the display is not working right, try this.
-      //mxconfig.driver = HUB75_I2S_CFG::FM6126A;
+    dma_display = new MatrixPanel_I2S_DMA(mxconfig);
+    dma_display->begin();
+    dma_display->setRotation(3);
+    dma_display->setBrightness(BRIGHTNESS);
 
-      dma_display = new MatrixPanel_I2S_DMA(mxconfig);
-      dma_display->begin();
+    // Create gamma lookup table
+    createCustomCurveTable();
+  }
+
+  void showDefaultScreen()
+  {
+    dma_display->fillScreen(myBLACK);
+  }
+
+  void displayTrackProgress(long progress, long duration)
+  {
+    // Nothing to do for Matrix
+  }
+
+  void printCurrentlyPlayingToScreen(CurrentlyPlaying currentlyPlaying)
+  {
+    // Nothing to do for Matrix
+  }
+
+  void checkForInput()
+  {
+    // Nothing to do for Matrix
+  }
+
+  // Image Related
+  void clearImage()
+  {
+    dma_display->fillScreen(myBLACK);
+  }
+
+  boolean processImageInfo(CurrentlyPlaying currentlyPlaying)
+  {
+    SpotifyImage currentlyPlayingSmallImage = currentlyPlaying.albumImages[currentlyPlaying.numImages - 1];
+    if (!albumDisplayed || !isSameAlbum(currentlyPlayingSmallImage.url))
+    {
+      // We have a differenent album than we currently have displayed
+      albumDisplayed = false;
+      setImageHeight(currentlyPlayingSmallImage.height);
+      setImageWidth(currentlyPlayingSmallImage.width);
+      setAlbumArtUrl(currentlyPlayingSmallImage.url);
+      return true;
     }
 
-    void showDefaultScreen() {
-      dma_display->fillScreen(myBLACK);
-    }
+    return false;
+  }
 
-    void displayTrackProgress(long progress, long duration) {
-      //Nothing to do for Matrix
-    }
-
-    void printCurrentlyPlayingToScreen(CurrentlyPlaying currentlyPlaying) {
-      //Nothing to do for Matrix
-    }
-
-    void checkForInput() {
-      //Nothing to do for Matrix
-    }
-
-    //Image Related
-    void clearImage() {
-      dma_display->fillScreen(myBLACK);
-    }
-
-    boolean processImageInfo(CurrentlyPlaying currentlyPlaying) {
-      SpotifyImage currentlyPlayingSmallImage = currentlyPlaying.albumImages[currentlyPlaying.numImages - 1];
-      if (!albumDisplayed || !isSameAlbum(currentlyPlayingSmallImage.url)) {
-        // We have a differenent album than we currently have displayed
-        albumDisplayed = false;
-        setImageHeight(currentlyPlayingSmallImage.height);
-        setImageWidth(currentlyPlayingSmallImage.width);
-        setAlbumArtUrl(currentlyPlayingSmallImage.url);
-        return true;
-      }
-
-      return false;
-    }
-
-    int displayImage() {
-      int imageStatus = displayImageUsingFile(_albumArtUrl);
-      Serial.print("imageStatus: ");
-      Serial.println(imageStatus);
-      if (imageStatus) {
-        albumDisplayed = true;
-        return imageStatus;
-      }
-
+  int displayImage()
+  {
+    int imageStatus = displayImageUsingFile(_albumArtUrl);
+    Serial.print("imageStatus: ");
+    Serial.println(imageStatus);
+    if (imageStatus)
+    {
+      albumDisplayed = true;
       return imageStatus;
     }
 
+    return imageStatus;
+  }
 
+  // NFC tag messages
+  void markDisplayAsTagRead()
+  {
+    dma_display->drawRect(1, 1, dma_display->width() - 2, dma_display->height() - 2, dma_display->color444(0, 0, 255));
+    dma_display->drawRect(2, 2, dma_display->width() - 4, dma_display->height() - 4, dma_display->color444(255, 0, 0));
+  }
+  void markDisplayAsTagWritten()
+  {
+    dma_display->drawRect(1, 1, dma_display->width() - 2, dma_display->height() - 2, dma_display->color444(255, 0, 255));
+    dma_display->drawRect(2, 2, dma_display->width() - 4, dma_display->height() - 4, dma_display->color444(0, 255, 0));
+  }
 
-    //NFC tag messages
-    void markDisplayAsTagRead() {
-      dma_display->drawRect(1, 1, dma_display->width() - 2, dma_display->height() - 2, dma_display->color444(0, 0, 255));
-      dma_display->drawRect(2, 2, dma_display->width() - 4, dma_display->height() - 4, dma_display->color444(255, 0, 0));
-    }
-    void markDisplayAsTagWritten() {
-      dma_display->drawRect(1, 1, dma_display->width() - 2, dma_display->height() - 2, dma_display->color444(255, 0, 255));
-      dma_display->drawRect(2, 2, dma_display->width() - 4, dma_display->height() - 4, dma_display->color444(0, 255, 0));
-    }
+  void drawWifiManagerMessage(WiFiManager *myWiFiManager)
+  {
+    Serial.println("Entered Conf Mode");
+    dma_display->fillScreen(myBLACK);
+    dma_display->setTextSize(1); // size 1 == 8 pixels high
+    dma_display->setTextWrap(false);
+    dma_display->setTextColor(myBLUE);
+    dma_display->setCursor(0, 0);
+    dma_display->print(myWiFiManager->getConfigPortalSSID());
 
-    void drawWifiManagerMessage(WiFiManager *myWiFiManager) {
-      Serial.println("Entered Conf Mode");
-      dma_display->fillScreen(myBLACK);
-      dma_display->setTextSize(1);     // size 1 == 8 pixels high
-      dma_display->setTextWrap(false);
-      dma_display->setTextColor(myBLUE);
-      dma_display->setCursor(0, 0);
-      dma_display->print(myWiFiManager->getConfigPortalSSID());
+    dma_display->setTextWrap(true);
+    dma_display->setTextColor(myRED);
+    dma_display->setCursor(0, 8);
+    dma_display->print(WiFi.softAPIP());
+  }
 
-      dma_display->setTextWrap(true);
-      dma_display->setTextColor(myRED);
-      dma_display->setCursor(0, 8);
-      dma_display->print(WiFi.softAPIP());
-    }
+  void drawRefreshTokenMessage()
+  {
+    Serial.println("Refresh Token Mode");
+    Serial.println("Entered Conf Mode");
+    dma_display->fillScreen(myBLACK);
+    dma_display->setTextSize(1); // size 1 == 8 pixels high
+    dma_display->setTextWrap(false);
+    dma_display->setTextColor(myBLUE);
+    dma_display->setCursor(0, 0);
+    dma_display->print("Refresh Token");
 
-    void drawRefreshTokenMessage() {
-      Serial.println("Refresh Token Mode");
-      Serial.println("Entered Conf Mode");
-      dma_display->fillScreen(myBLACK);
-      dma_display->setTextSize(1);     // size 1 == 8 pixels high
-      dma_display->setTextWrap(false);
-      dma_display->setTextColor(myBLUE);
-      dma_display->setCursor(0, 0);
-      dma_display->print("Refresh Token");
+    dma_display->setTextWrap(true);
+    dma_display->setTextColor(myRED);
+    dma_display->setCursor(0, 8);
+    dma_display->print(WiFi.localIP());
+  }
 
-      dma_display->setTextWrap(true);
-      dma_display->setTextColor(myRED);
-      dma_display->setCursor(0, 8);
-      dma_display->print(WiFi.localIP());
+private:
+  int displayImageUsingFile(char *albumArtUrl)
+  {
 
-    }
-
-  private:
-
-    int displayImageUsingFile(char *albumArtUrl)
+    // In this example I reuse the same filename
+    // over and over, maybe saving the art using
+    // the album URI as the name would be better
+    // as you could save having to download them each
+    // time, but this seems to work fine.
+    if (SPIFFS.exists(ALBUM_ART) == true)
     {
-
-      // In this example I reuse the same filename
-      // over and over, maybe saving the art using
-      // the album URI as the name would be better
-      // as you could save having to download them each
-      // time, but this seems to work fine.
-      if (SPIFFS.exists(ALBUM_ART) == true)
-      {
-        Serial.println("Removing existing image");
-        SPIFFS.remove(ALBUM_ART);
-      }
-
-      fs::File f = SPIFFS.open(ALBUM_ART, "w+");
-      if (!f)
-      {
-        Serial.println("file open failed");
-        return -1;
-      }
-
-      // Spotify uses a different cert for the Image server, so we need to swap to that for the call
-      client.setCACert(spotify_image_server_cert);
-      bool gotImage = spotify_display->getImage(albumArtUrl, &f);
-
-      // Swapping back to the main spotify cert
-      client.setCACert(spotify_server_cert);
-
-      // Make sure to close the file!
-      f.close();
-
-      if (gotImage)
-      {
-        return drawImagefromFile(ALBUM_ART);
-      }
-      else
-      {
-        return -2;
-      }
+      Serial.println("Removing existing image");
+      SPIFFS.remove(ALBUM_ART);
     }
 
-    int drawImagefromFile(const char *imageFileUri) {
-      unsigned long lTime = millis();
-      lTime = millis();
-      jpeg.open((const char *) imageFileUri, myOpen, myClose, myRead, mySeek, JPEGDraw);
-      int decodeStatus = jpeg.decode(0, 0, 0);
-      jpeg.close();
-      Serial.print("Time taken to decode and display Image (ms): ");
-      Serial.println(millis() - lTime);
-
-      return decodeStatus;
+    fs::File f = SPIFFS.open(ALBUM_ART, "w+");
+    if (!f)
+    {
+      Serial.println("file open failed");
+      return -1;
     }
 
+    // Spotify uses a different cert for the Image server, so we need to swap to that for the call
+    client.setCACert(spotify_image_server_cert);
+    bool gotImage = spotify_display->getImage(albumArtUrl, &f);
+
+    // Swapping back to the main spotify cert
+    client.setCACert(spotify_server_cert);
+
+    // Make sure to close the file!
+    f.close();
+
+    if (gotImage)
+    {
+      return drawImagefromFile(ALBUM_ART);
+    }
+    else
+    {
+      return -2;
+    }
+  }
+
+  int drawImagefromFile(const char *imageFileUri)
+  {
+    unsigned long lTime = millis();
+    lTime = millis();
+    jpeg.open((const char *)imageFileUri, myOpen, myClose, myRead, mySeek, JPEGDraw);
+    int decodeStatus = jpeg.decode(0, 0, 0);
+    jpeg.close();
+    Serial.print("Time taken to decode and display Image (ms): ");
+    Serial.println(millis() - lTime);
+
+    return decodeStatus;
+  }
 };

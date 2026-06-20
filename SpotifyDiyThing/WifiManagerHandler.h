@@ -26,6 +26,7 @@ void saveConfigCallback () {
 
 void setupWiFiManager(bool forceConfig, char *refreshToken, void (*saveConfig)(char *, char *, char *), void (*configModeCallback)(WiFiManager *myWiFiManager)){
   WiFiManager wm;
+
   //set config save notify callback
   wm.setSaveConfigCallback(saveConfigCallback);
   //set callback that gets called when connecting to previous WiFi fails, and enters Access Point mode
